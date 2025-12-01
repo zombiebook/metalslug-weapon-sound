@@ -5,8 +5,8 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <AssemblyName>msvoice</AssemblyName>
-    <RootNamespace>msvoice</RootNamespace>
+    <AssemblyName>metalslugvoice</AssemblyName>
+    <RootNamespace>metalslugvoice</RootNamespace>
   </PropertyGroup>
 
   <!-- 코드 파일 포함 -->
@@ -16,7 +16,7 @@
     <Compile Include="ItemSettings\*.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="msvoice.cs" />
+    <Compile Include="metalslugvoice.cs" />
   </ItemGroup>
 
   <!-- DLL 참조 -->
