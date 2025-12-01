@@ -36,22 +36,18 @@ namespace metalslugvoice
     {
         private static MsVoiceManager _instance;
 
-        // ───────── 로컬 플레이어 추적 ─────────
-        private Component _localPlayer;
-        private Type _localPlayerType;
-        private bool _searchedLocalPlayerOnce;
-        private float _nextPlayerSearchTime;
+        // ───────── 메인 리로드 액션 / 무기 상태 ─────────
+        private CA_Reload _mainReload;
+        private float _nextReloadSearchTime;
 
-        // ───────── ItemAgent_* 추적 ─────────
-        private Type[] _itemAgentTypes;
-        private bool _triedResolveItemAgentTypes;
-        private float _nextWeaponScanTime;
+        private UnityEngine.Object _lastGunAgent;
+        private WeaponVoiceClass _lastGunClass = WeaponVoiceClass.None;
+        private float _nextGunCheckTime;
 
-        // 각 ItemAgent_* 인스턴스별 마지막 TypeID
-        private readonly Dictionary<UnityEngine.Object, int> _lastGunTypeId =
-            new Dictionary<UnityEngine.Object, int>();
+        private const float ReloadSearchInterval = 1.0f;  // 1초마다 CA_Reload 탐색
+        private const float GunCheckInterval = 0.15f; // 0.15초마다 현재 무기 체크
 
-        // AR 무기 TypeID 목록 – 238 포함 (당신이 준 값)
+        // AR 무기 TypeID 목록 – 238 포함 (네가 준 값)
         private readonly HashSet<int> _arTypeIds = new HashSet<int>
         {
             238,
@@ -67,7 +63,7 @@ namespace metalslugvoice
             1238,
         };
 
-        // 샷건 무기 TypeID 목록 (당신이 준 값)
+        // 샷건 무기 TypeID 목록 (네가 준 값)
         private readonly HashSet<int> _shotgunTypeIds = new HashSet<int>
         {
             248,
@@ -78,7 +74,7 @@ namespace metalslugvoice
             1089,
         };
 
-        // 스나이퍼 무기 TypeID 목록 – 나중에 채울 수 있음
+        // 스나이퍼 무기 TypeID 목록 (네가 준 값)
         private readonly HashSet<int> _sniperTypeIds = new HashSet<int>
         {
             246,
@@ -89,26 +85,27 @@ namespace metalslugvoice
             782,
         };
 
-        // 수류탄 TypeID 목록 – 빠른아이템 슬롯용 (지금은 비워두고 키 입력으로 처리)
-        private readonly HashSet<int> _grenadeTypeIds = new HashSet<int>
-        {
-            // 예: 500, 501 ...
-            // 수류탄 TypeID를 알게 되면 여기 추가
-        };
-
-        // 무기 보이스 분류
         private enum WeaponVoiceClass
         {
             None = 0,
             AR = 1,
             Shotgun = 2,
             Sniper = 3,
-            Grenade = 4,
         }
 
         // Item / ItemEntry 타입별 TypeID 멤버 캐시
         private readonly Dictionary<Type, MemberInfo> _itemTypeIdMemberCache =
             new Dictionary<Type, MemberInfo>();
+
+        // CA_Reload → characterController 필드 캐시
+        private FieldInfo _actionCharacterControllerField;
+
+        // characterController → agentHolder 필드 캐시
+        private FieldInfo _controllerAgentHolderField;
+
+        // agentHolder → CurrentHoldGun 멤버 캐시
+        private PropertyInfo _holderCurrentGunProp;
+        private FieldInfo _holderCurrentGunField;
 
         private void Awake()
         {
@@ -133,6 +130,15 @@ namespace metalslugvoice
             {
                 _instance = null;
             }
+        }
+
+        // ─────────────────────────────────────────
+        // UnityEngine.Object 파괴 감지 (씬 이동 등)
+        // ─────────────────────────────────────────
+        private bool IsUnityObjectDestroyed(object obj)
+        {
+            UnityEngine.Object u = obj as UnityEngine.Object;
+            return u != null && u == null;
         }
 
         // ─────────────────────────────────────────
@@ -163,25 +169,21 @@ namespace metalslugvoice
             }
         }
 
-        // Heavy Machine Gun!
         private void PlayHeavyMachineGun()
         {
             PlayVoice("heavy_machine_gun.wav");
         }
 
-        // Shotgun!
         private void PlayShotgun()
         {
             PlayVoice("shotgun.wav");
         }
 
-        // Armor Piercer!
         private void PlayArmorPiercer()
         {
             PlayVoice("armor_piercer.wav");
         }
 
-        // Grenade!
         private void PlayGrenade()
         {
             PlayVoice("grenade.wav");
@@ -193,14 +195,28 @@ namespace metalslugvoice
 
         private void Update()
         {
-            // ① F10: 항상 Heavy Machine Gun 테스트 재생
+            // 맵 이동 등으로 리로드 액션이 파괴되었으면 초기화
+            if (_mainReload != null && IsUnityObjectDestroyed(_mainReload))
+            {
+                Debug.Log("[msvoice] 메인 리로드 액션 파괴 감지 → 참조 초기화");
+                _mainReload = null;
+                _lastGunAgent = null;
+                _lastGunClass = WeaponVoiceClass.None;
+                _actionCharacterControllerField = null;
+                _controllerAgentHolderField = null;
+                _holderCurrentGunProp = null;
+                _holderCurrentGunField = null;
+                _nextReloadSearchTime = 0f;
+            }
+
+            // F10: 테스트용
             if (UnityEngine.Input.GetKeyDown(KeyCode.F10))
             {
                 Debug.Log("[msvoice] F10 테스트 재생");
                 PlayHeavyMachineGun();
             }
 
-            // ② 퀵슬롯 키 (3,4,5,6,7,8) 입력 시 Grenade! 보이스 재생
+            // 퀵슬롯 키 (3~8) → Grenade!
             if (UnityEngine.Input.GetKeyDown(KeyCode.Alpha3) ||
                 UnityEngine.Input.GetKeyDown(KeyCode.Alpha4) ||
                 UnityEngine.Input.GetKeyDown(KeyCode.Alpha5) ||
@@ -212,316 +228,326 @@ namespace metalslugvoice
                 PlayGrenade();
             }
 
-            // ③ 로컬 플레이어 없으면 먼저 찾기
-            if (_localPlayer == null)
+            // ① 메인 CA_Reload 찾기
+            if (_mainReload == null && Time.unscaledTime >= _nextReloadSearchTime)
             {
-                TryFindLocalPlayerPeriodically();
-                return;
+                _nextReloadSearchTime = Time.unscaledTime + ReloadSearchInterval;
+                TryResolveMainReload();
             }
 
-            // ④ 일정 주기로 ItemAgent_* 기반 무기/아이템 교체 이벤트 감지
-            if (Time.unscaledTime >= _nextWeaponScanTime)
+            // ② 현재 무기 체크 (내 캐릭터 한 명만)
+            if (_mainReload != null && Time.unscaledTime >= _nextGunCheckTime)
             {
-                _nextWeaponScanTime = Time.unscaledTime + 0.2f; // 0.2초마다 가볍게 스캔
-                EnsureItemAgentTypes();
-                if (_itemAgentTypes != null && _itemAgentTypes.Length > 0)
-                {
-                    ScanItemAgents();
-                }
+                _nextGunCheckTime = Time.unscaledTime + GunCheckInterval;
+                CheckCurrentGunAndPlayVoice();
             }
         }
 
-
         // ─────────────────────────────────────────
-        // 로컬 플레이어 찾기
+        // 메인 리로드 액션 찾기 (CA_Reload 기반)
         // ─────────────────────────────────────────
 
-        private void TryFindLocalPlayerPeriodically()
+        private void TryResolveMainReload()
         {
-            if (Time.unscaledTime < _nextPlayerSearchTime) return;
-            _nextPlayerSearchTime = Time.unscaledTime + 1.0f;
-
-            MonoBehaviour[] all = FindObjectsOfType<MonoBehaviour>();
-            MonoBehaviour firstCharacter = null;
-
-            for (int i = 0; i < all.Length; i++)
+            try
             {
-                MonoBehaviour mb = all[i];
-                if (mb == null) continue;
-
-                GameObject go = mb.gameObject;
-                if (go == null) continue;
-
-                string goName = go.name;
-                if (string.IsNullOrEmpty(goName)) continue;
-
-                if (!goName.Contains("Character") && !goName.Contains("Player"))
+                CA_Reload[] reloads = UnityEngine.Object.FindObjectsOfType<CA_Reload>();
+                if (reloads == null || reloads.Length == 0)
                 {
-                    continue;
+                    return;
                 }
 
-                if (firstCharacter == null)
+                CA_Reload fallback = null;
+
+                for (int i = 0; i < reloads.Length; i++)
                 {
-                    firstCharacter = mb;
+                    CA_Reload action = reloads[i];
+                    if (action == null) continue;
+
+                    if (fallback == null)
+                        fallback = action;
+
+                    object ctrl = GetCharacterControllerFromAction(action);
+                    if (ctrl == null) continue;
+
+                    if (IsMainCharacter(ctrl))
+                    {
+                        _mainReload = action;
+                        Debug.Log("[msvoice] 메인 리로드 액션 확보: " +
+                                  action.GetType().FullName + " / " +
+                                  action.gameObject.name);
+                        return;
+                    }
                 }
 
-                Type t = mb.GetType();
-                Debug.Log("[msvoice] 플레이어 후보 오브젝트 발견: " + goName + " / 컴포넌트=" + t.FullName);
-
-                if (!IsLocalPlayer(mb, t))
+                // IsMainCharacter 정보를 못 찾았으면 첫 번째라도 사용
+                if (fallback != null)
                 {
-                    continue;
+                    _mainReload = fallback;
+                    Debug.Log("[msvoice] 메인 플래그는 없지만 첫 CA_Reload 사용: " +
+                              fallback.GetType().FullName + " / " +
+                              fallback.gameObject.name);
                 }
-
-                _localPlayer = mb;
-                _localPlayerType = t;
-                Debug.Log("[msvoice] 로컬 플레이어로 확정: " + goName + " / " + t.FullName);
-                return;
             }
-
-            if (_localPlayer == null && firstCharacter != null)
+            catch (Exception ex)
             {
-                _localPlayer = firstCharacter;
-                _localPlayerType = firstCharacter.GetType();
-                Debug.Log("[msvoice] IsLocalPlayer 정보를 찾지 못해, 첫 Character/Player 오브젝트를 로컬 플레이어로 사용: "
-                          + _localPlayer.gameObject.name + " / " + _localPlayerType.FullName);
-                return;
-            }
-
-            if (_localPlayer == null && !_searchedLocalPlayerOnce)
-            {
-                Debug.Log("[msvoice] Character/Player 라는 이름을 가진 오브젝트를 찾지 못함");
-                _searchedLocalPlayerOnce = true;
+                Debug.Log("[msvoice] TryResolveMainReload 예외: " + ex);
             }
         }
 
-        private bool IsLocalPlayer(object player, Type t)
+        private object GetCharacterControllerFromAction(CA_Reload action)
         {
-            if (player == null || t == null) return false;
+            if (action == null) return null;
 
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            if (_actionCharacterControllerField == null)
+            {
+                BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                Type t = typeof(CA_Reload);
+                FieldInfo field = null;
+
+                while (t != null && field == null)
+                {
+                    field =
+                        t.GetField("characterController", flags) ??
+                        t.GetField("CharacterController", flags);
+                    t = t.BaseType;
+                }
+
+                _actionCharacterControllerField = field;
+            }
+
+            if (_actionCharacterControllerField == null) return null;
 
             try
             {
+                return _actionCharacterControllerField.GetValue(action);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private bool IsMainCharacter(object controller)
+        {
+            if (controller == null) return false;
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            Type t = controller.GetType();
+
+            try
+            {
+                // Property 우선
                 PropertyInfo prop =
+                    t.GetProperty("IsMainCharacter", flags) ??
+                    t.GetProperty("isMainCharacter", flags) ??
                     t.GetProperty("IsLocalPlayer", flags) ??
                     t.GetProperty("isLocalPlayer", flags) ??
                     t.GetProperty("IsMine", flags);
 
                 if (prop != null && prop.PropertyType == typeof(bool))
                 {
-                    bool value = (bool)prop.GetValue(player, null);
+                    bool value = (bool)prop.GetValue(controller, null);
                     return value;
                 }
             }
             catch (Exception ex)
             {
-                Debug.Log("[msvoice] IsLocalPlayer(Prop) 예외: " + ex);
+                Debug.Log("[msvoice] IsMainCharacter(Prop) 예외: " + ex);
             }
 
             try
             {
                 FieldInfo field =
+                    t.GetField("IsMainCharacter", flags) ??
+                    t.GetField("isMainCharacter", flags) ??
                     t.GetField("IsLocalPlayer", flags) ??
                     t.GetField("isLocalPlayer", flags);
 
                 if (field != null && field.FieldType == typeof(bool))
                 {
-                    bool value = (bool)field.GetValue(player);
+                    bool value = (bool)field.GetValue(controller);
                     return value;
                 }
             }
             catch (Exception ex)
             {
-                Debug.Log("[msvoice] IsLocalPlayer(Field) 예외: " + ex);
+                Debug.Log("[msvoice] IsMainCharacter(Field) 예외: " + ex);
             }
 
-            // 정보 없으면 일단 true
-            return true;
+            return false;
         }
 
         // ─────────────────────────────────────────
-        // ItemAgent_* 타입 찾기 (한 번만)
+        // characterController → CurrentHoldGun 얻기
         // ─────────────────────────────────────────
 
-        private void EnsureItemAgentTypes()
+        private UnityEngine.Object GetCurrentGunAgentFromReload()
         {
-            if ((_itemAgentTypes != null && _itemAgentTypes.Length > 0) || _triedResolveItemAgentTypes)
+            if (_mainReload == null) return null;
+
+            object controller = GetCharacterControllerFromAction(_mainReload);
+            if (controller == null) return null;
+
+            // controller → agentHolder
+            if (_controllerAgentHolderField == null)
+            {
+                BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                Type t = controller.GetType();
+                FieldInfo field = null;
+
+                while (t != null && field == null)
+                {
+                    field =
+                        t.GetField("agentHolder", flags) ??
+                        t.GetField("AgentHolder", flags);
+                    t = t.BaseType;
+                }
+
+                _controllerAgentHolderField = field;
+            }
+
+            if (_controllerAgentHolderField == null) return null;
+
+            object holder;
+            try
+            {
+                holder = _controllerAgentHolderField.GetValue(controller);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (holder == null) return null;
+
+            // holder → CurrentHoldGun
+            if (_holderCurrentGunProp == null && _holderCurrentGunField == null)
+            {
+                BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                Type ht = holder.GetType();
+
+                _holderCurrentGunProp =
+                    ht.GetProperty("CurrentHoldGun", flags) ??
+                    ht.GetProperty("currentHoldGun", flags);
+
+                if (_holderCurrentGunProp == null)
+                {
+                    _holderCurrentGunField =
+                        ht.GetField("CurrentHoldGun", flags) ??
+                        ht.GetField("currentHoldGun", flags);
+                }
+            }
+
+            object gunObj = null;
+
+            try
+            {
+                if (_holderCurrentGunProp != null)
+                {
+                    gunObj = _holderCurrentGunProp.GetValue(holder, null);
+                }
+                else if (_holderCurrentGunField != null)
+                {
+                    gunObj = _holderCurrentGunField.GetValue(holder);
+                }
+            }
+            catch
+            {
+                return null;
+            }
+
+            UnityEngine.Object uo = gunObj as UnityEngine.Object;
+            if (uo != null && uo == null)
+            {
+                return null; // 파괴된 총기
+            }
+
+            return uo;
+        }
+
+        // ─────────────────────────────────────────
+        // 현재 무기 변경 감지 + 보이스 재생
+        // ─────────────────────────────────────────
+
+        private void CheckCurrentGunAndPlayVoice()
+        {
+            UnityEngine.Object gunAgent = GetCurrentGunAgentFromReload();
+            if (gunAgent == null)
+            {
+                _lastGunAgent = null;
+                _lastGunClass = WeaponVoiceClass.None;
+                return;
+            }
+
+            // 에이전트 인스턴스가 바뀐 경우만 "무기 교체"로 봄
+            if (gunAgent == _lastGunAgent)
             {
                 return;
             }
 
-            _triedResolveItemAgentTypes = true;
+            _lastGunAgent = gunAgent;
 
-            try
+            object itemEntry = GetItemFromAgent(gunAgent);
+            if (itemEntry == null)
             {
-                List<Type> found = new List<Type>();
-
-                Assembly[] asms = AppDomain.CurrentDomain.GetAssemblies();
-                for (int i = 0; i < asms.Length; i++)
-                {
-                    Assembly asm = asms[i];
-                    Type[] types;
-                    try
-                    {
-                        types = asm.GetTypes();
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    for (int j = 0; j < types.Length; j++)
-                    {
-                        Type t = types[j];
-                        if (t == null) continue;
-                        if (!typeof(MonoBehaviour).IsAssignableFrom(t)) continue;
-
-                        string name = t.Name;
-                        if (string.IsNullOrEmpty(name)) continue;
-                        if (!name.StartsWith("ItemAgent_", StringComparison.Ordinal)) continue;
-
-                        found.Add(t);
-                        Debug.Log("[msvoice] ItemAgent 타입 발견: " + t.FullName);
-                    }
-                }
-
-                _itemAgentTypes = found.ToArray();
-
-                if (_itemAgentTypes.Length == 0)
-                {
-                    Debug.Log("[msvoice] ItemAgent_* 타입을 찾지 못함");
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.Log("[msvoice] EnsureItemAgentTypes 예외: " + ex);
-            }
-        }
-
-        // ─────────────────────────────────────────
-        // ItemAgent_* 기반 무기/아이템 교체 이벤트 감지
-        // ─────────────────────────────────────────
-
-        private void ScanItemAgents()
-        {
-            if (_itemAgentTypes == null || _itemAgentTypes.Length == 0) return;
-
-            HashSet<UnityEngine.Object> seen = new HashSet<UnityEngine.Object>();
-
-            for (int tIndex = 0; tIndex < _itemAgentTypes.Length; tIndex++)
-            {
-                Type agentType = _itemAgentTypes[tIndex];
-                if (agentType == null) continue;
-
-                UnityEngine.Object[] objs = UnityEngine.Object.FindObjectsOfType(agentType);
-                if (objs == null || objs.Length == 0) continue;
-
-                for (int i = 0; i < objs.Length; i++)
-                {
-                    UnityEngine.Object obj = objs[i];
-                    if (obj == null) continue;
-
-                    if (!seen.Add(obj))
-                    {
-                        continue; // 이미 다른 타입에서 처리함
-                    }
-
-                    MonoBehaviour mb = obj as MonoBehaviour;
-                    if (mb == null) continue;
-
-                    object itemEntry = FindItemFromAgent(mb);
-                    if (itemEntry == null) continue;
-
-                    int? typeId = GetTypeIdFromItemEntry(itemEntry);
-                    if (!typeId.HasValue) continue;
-
-                    int lastType;
-                    bool hadLast = _lastGunTypeId.TryGetValue(obj, out lastType);
-
-                    WeaponVoiceClass newClass = GetWeaponVoiceClass(typeId.Value);
-                    WeaponVoiceClass oldClass = hadLast ? GetWeaponVoiceClass(lastType) : WeaponVoiceClass.None;
-
-                    if (newClass != WeaponVoiceClass.None && newClass != oldClass)
-                    {
-                        string goName = mb.gameObject != null ? mb.gameObject.name : "(no GameObject)";
-                        Debug.Log("[msvoice] ItemAgent 무기/아이템 교체 감지: go=" + goName + " typeId=" + typeId.Value + " class=" + newClass + " → 보이스 재생");
-
-                        if (newClass == WeaponVoiceClass.AR)
-                        {
-                            PlayHeavyMachineGun();
-                        }
-                        else if (newClass == WeaponVoiceClass.Shotgun)
-                        {
-                            PlayShotgun();
-                        }
-                        else if (newClass == WeaponVoiceClass.Sniper)
-                        {
-                            PlayArmorPiercer();
-                        }
-                        else if (newClass == WeaponVoiceClass.Grenade)
-                        {
-                            PlayGrenade();
-                        }
-                    }
-
-                    _lastGunTypeId[obj] = typeId.Value;
-                }
+                _lastGunClass = WeaponVoiceClass.None;
+                return;
             }
 
-            // 사라진 에이전트 정리
-            if (_lastGunTypeId.Count > 0)
+            int? typeId = GetTypeIdFromItemEntry(itemEntry);
+            if (!typeId.HasValue)
             {
-                List<UnityEngine.Object> toRemove = null;
-                foreach (KeyValuePair<UnityEngine.Object, int> kv in _lastGunTypeId)
-                {
-                    UnityEngine.Object key = kv.Key;
-                    if (key == null || !seen.Contains(key))
-                    {
-                        if (toRemove == null) toRemove = new List<UnityEngine.Object>();
-                        toRemove.Add(key);
-                    }
-                }
+                _lastGunClass = WeaponVoiceClass.None;
+                return;
+            }
 
-                if (toRemove != null)
-                {
-                    for (int i = 0; i < toRemove.Count; i++)
-                    {
-                        _lastGunTypeId.Remove(toRemove[i]);
-                    }
-                }
+            WeaponVoiceClass newClass = GetWeaponVoiceClass(typeId.Value);
+
+            Debug.Log("[msvoice] 현재 무기 교체 감지: gun=" +
+                      gunAgent.name + " typeId=" + typeId.Value +
+                      " class=" + newClass);
+
+            _lastGunClass = newClass;
+
+            switch (newClass)
+            {
+                case WeaponVoiceClass.AR:
+                    PlayHeavyMachineGun();
+                    break;
+                case WeaponVoiceClass.Shotgun:
+                    PlayShotgun();
+                    break;
+                case WeaponVoiceClass.Sniper:
+                    PlayArmorPiercer();
+                    break;
             }
         }
 
         private WeaponVoiceClass GetWeaponVoiceClass(int typeId)
         {
-            if (_arTypeIds.Contains(typeId))
-                return WeaponVoiceClass.AR;
-            if (_shotgunTypeIds.Contains(typeId))
-                return WeaponVoiceClass.Shotgun;
-            if (_sniperTypeIds.Contains(typeId))
-                return WeaponVoiceClass.Sniper;
-            if (_grenadeTypeIds.Contains(typeId))
-                return WeaponVoiceClass.Grenade;
+            if (_arTypeIds.Contains(typeId)) return WeaponVoiceClass.AR;
+            if (_shotgunTypeIds.Contains(typeId)) return WeaponVoiceClass.Shotgun;
+            if (_sniperTypeIds.Contains(typeId)) return WeaponVoiceClass.Sniper;
             return WeaponVoiceClass.None;
         }
 
         // ─────────────────────────────────────────
-        // ItemAgent_* → ItemStatsSystem.Item 찾기 (깊이 제한 재귀)
+        // ItemAgent_Gun 등 → Item 찾기 (깊이 제한 재귀)
         // ─────────────────────────────────────────
 
-        private object FindItemFromAgent(MonoBehaviour agentMb)
+        private object GetItemFromAgent(UnityEngine.Object agent)
         {
-            if (agentMb == null) return null;
+            if (agent == null) return null;
 
             try
             {
                 HashSet<object> visited = new HashSet<object>();
-                return FindItemEntryFromObjectInternal(agentMb, 0, 3, visited);
+                return FindItemEntryFromObjectInternal(agent, 0, 3, visited);
             }
             catch (Exception ex)
             {
-                Debug.Log("[msvoice] FindItemFromAgent 예외: " + ex);
+                Debug.Log("[msvoice] GetItemFromAgent 예외: " + ex);
                 return null;
             }
         }
@@ -653,11 +679,16 @@ namespace metalslugvoice
             if (typeof(Item).IsAssignableFrom(t)) return true;
 
             string ns = t.Namespace ?? string.Empty;
-            string name = t.Name;
+            string name = t.Name ?? string.Empty;
 
             if (ns.Contains("ItemStatsSystem")) return true;
-            if (name.Contains("Item") || name.Contains("ItemEntry") || name.Contains("ItemSetting") || name.Contains("Inventory"))
+            if (name.Contains("Item") ||
+                name.Contains("ItemEntry") ||
+                name.Contains("ItemSetting") ||
+                name.Contains("Inventory"))
+            {
                 return true;
+            }
 
             return false;
         }
@@ -672,6 +703,7 @@ namespace metalslugvoice
 
             Type t = itemEntry.GetType();
             MemberInfo cached;
+
             if (!_itemTypeIdMemberCache.TryGetValue(t, out cached))
             {
                 BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
