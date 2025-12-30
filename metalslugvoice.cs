@@ -61,6 +61,7 @@ namespace metalslugvoice
             682,
             862,
             1238,
+            1392,
         };
 
         // 샷건 무기 TypeID 목록 (네가 준 값)
@@ -756,3 +757,4 @@ namespace metalslugvoice
         }
     }
 }
+
