@@ -61,6 +61,7 @@ namespace metalslugvoice
             682,
             862,
             1238,
+			1300,
             1362,
         };
 
@@ -73,6 +74,7 @@ namespace metalslugvoice
             658,
             876,
             1089,
+			1386,
         };
 
         // 스나이퍼 무기 TypeID 목록 (네가 준 값)
@@ -84,6 +86,7 @@ namespace metalslugvoice
             780,
             781,
             782,
+			1480,
         };
 
         private enum WeaponVoiceClass
